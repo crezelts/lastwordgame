@@ -136,62 +136,82 @@ if st.session_state.error_msg:
 
 # --- 4. 메인 로직 ---
 if not st.session_state.game_over:
-    # AI 응답 처리
+    # AI 응답 처리 (스트리밍)
     if st.session_state.ai_response_pending and st.session_state.pending_user_word:
         user_input = st.session_state.pending_user_word
         
-        with st.spinner("AI가 생각 중..."):
-            valid_starts_for_ai = get_valid_starts(user_input[-1])
-            prompt = (
-                f"한국어 끝말잇기 게임 중이야. 규칙은 다음과 같아.\n"
-                f"1. 사용자가 방금 입력한 단어: '{user_input}'\n"
-                f"2. 규칙: 이 단어가 실제로 존재하는 한국어 명사인지 판단해주고 외래어도 허용해줘.\n"
-                f"3. 만약 부적절하다면 'INVALID:이유'라고 답해.\n"
-                f"4. 적절하다면, 다음 글자 중 하나로 시작하는 한국어 명사를 대답해: {', '.join(valid_starts_for_ai)}\n"
-                f"   두음법칙 예시:\n"
-                f"   - '냥'→'양', '녀'→'여', '뇨'→'요', '뉴'→'유', '니'→'이'\n"
-                f"   - '랴'→'야', '려'→'여', '례'→'예', '료'→'요', '류'→'유', '리'→'이'\n"
-                f"   - '라'→'나', '래'→'내', '로'→'노', '루'→'누', '르'→'느'\n"
-                f"5. 만약 네가 단어를 찾지 못하겠다면 'I_LOSE'라고 답해.\n"
-                f"6. 이미 사용된 단어들 (절대 이 중에서 선택하지 마): {st.session_state.word_list}\n"
-                f"7. 중요: 위 6번 리스트에 있는 단어는 절대 사용하면 안 돼. 새로운 단어만 말해.\n"
-                "단어만 말하고 다른 설명은 하지 마."
+        valid_starts_for_ai = get_valid_starts(user_input[-1])
+        prompt = (
+            f"한국어 끝말잇기 게임 중이야. 규칙은 다음과 같아.\n"
+            f"1. 사용자가 방금 입력한 단어: '{user_input}'\n"
+            f"2. 규칙: 이 단어가 실제로 존재하는 한국어 명사인지 판단해주고 외래어도 허용해줘.\n"
+            f"3. 만약 부적절하다면 'INVALID:이유'라고 답해.\n"
+            f"4. 적절하다면, 다음 글자 중 하나로 시작하는 한국어 명사를 대답해: {', '.join(valid_starts_for_ai)}\n"
+            f"   두음법칙 예시:\n"
+            f"   - '냥'→'양', '녀'→'여', '뇨'→'요', '뉴'→'유', '니'→'이'\n"
+            f"   - '랴'→'야', '려'→'여', '례'→'예', '료'→'요', '류'→'유', '리'→'이'\n"
+            f"   - '라'→'나', '래'→'내', '로'→'노', '루'→'누', '르'→'느'\n"
+            f"5. 만약 네가 단어를 찾지 못하겠다면 'I_LOSE'라고 답해.\n"
+            f"6. 이미 사용된 단어들 (절대 이 중에서 선택하지 마): {st.session_state.word_list}\n"
+            f"7. 중요: 위 6번 리스트에 있는 단어는 절대 사용하면 안 돼. 새로운 단어만 말해.\n"
+            "단어만 말하고 다른 설명은 하지 마."
+        )
+
+        try:
+            # 스트리밍 응답 수집
+            stream = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "너는 끝말잇기 심판이자 플레이어야."},
+                    {"role": "user", "content": prompt}
+                ],
+                stream=True
             )
+            
+            res_text = ""
+            with chat_placeholder:
+                # 기존 단어들 다시 표시
+                for i, word in enumerate(st.session_state.word_list):
+                    role = "user" if i % 2 == 0 else "assistant"
+                    st.chat_message(role).write(word)
+                
+                # 사용자 입력 표시
+                st.chat_message("user").write(user_input)
+                
+                # AI 응답 스트리밍 표시
+                with st.chat_message("assistant"):
+                    message_placeholder = st.empty()
+                    for chunk in stream:
+                        if chunk.choices[0].delta.content is not None:
+                            res_text += chunk.choices[0].delta.content
+                            message_placeholder.write(res_text + "▌")
+                    message_placeholder.write(res_text)
+            
+            res_text = res_text.strip()
 
-            try:
-                response = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{"role": "system", "content": "너는 끝말잇기 심판이자 플레이어야."},
-                              {"role": "user", "content": prompt}]
-                )
-                res_text = response.choices[0].message.content.strip()
-
-                if res_text.startswith("INVALID"):
-                    reason = res_text.split(":")[-1]
-                    st.session_state.error_msg = f"❌ {reason}"
-                elif res_text == "I_LOSE":
+            if res_text.startswith("INVALID"):
+                reason = res_text.split(":")[-1]
+                st.session_state.error_msg = f"❌ {reason}"
+            elif res_text == "I_LOSE":
+                st.session_state.word_list.append(user_input)
+                st.session_state.error_msg = "🎉 AI가 단어를 찾지 못해 패배를 선언했습니다!"
+                st.session_state.game_over = True
+            else:
+                # AI가 중복 단어를 말했는지 체크
+                if res_text in st.session_state.word_list or res_text == user_input:
                     st.session_state.word_list.append(user_input)
-                    st.session_state.error_msg = "🎉 AI가 단어를 찾지 못해 패배를 선언했습니다!"
+                    st.session_state.error_msg = "🎉 AI가 중복된 단어를 말해서 패배했습니다!"
                     st.session_state.game_over = True
                 else:
-                    # Verification System
-                    
-
-                    # AI가 중복 단어를 말했는지 체크
-                    if res_text in st.session_state.word_list or res_text == user_input:
-                        st.session_state.word_list.append(user_input)
-                        st.session_state.error_msg = "🎉 AI가 중복된 단어를 말해서 패배했습니다!"
-                        st.session_state.game_over = True
-                    else:
-                        st.session_state.word_list.append(user_input)
-                        st.session_state.word_list.append(res_text)
-                        st.session_state.remaining_time = 30
-            except Exception as e:
-                st.session_state.error_msg = f"AI 오류: {e}"
-            
-            st.session_state.ai_response_pending = False
-            st.session_state.pending_user_word = None
-            st.rerun()
+                    st.session_state.word_list.append(user_input)
+                    st.session_state.word_list.append(res_text)
+                    st.session_state.remaining_time = 30
+        except Exception as e:
+            st.session_state.error_msg = f"AI 오류: {e}"
+        
+        st.session_state.ai_response_pending = False
+        st.session_state.pending_user_word = None
+        st.rerun()
     
     user_input = st.chat_input("단어를 입력하세요...", disabled=st.session_state.ai_response_pending)
 
